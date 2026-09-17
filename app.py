@@ -1,17 +1,16 @@
 import streamlit as st
 import fitz
-import io
 
 def get_content_bbox(page):
     """提取页面内所有真实内容的边界框"""
     rects = []
-    blocks = page.get_text("blocks")
-    for b in blocks:
+    
+    for b in page.get_text("blocks"):
         rects.append(fitz.Rect(b[:4]))
-        
-    drawings = page.get_drawings()
-    for d in drawings:
+    for d in page.get_drawings():
         rects.append(d["rect"])
+    for img in page.get_image_info():
+        rects.append(fitz.Rect(img["bbox"]))
         
     if not rects:
         return fitz.Rect()
@@ -19,31 +18,42 @@ def get_content_bbox(page):
     bbox = rects[0]
     for r in rects[1:]:
         bbox |= r
-        
     return bbox
 
-def center_pdf_stream(input_bytes):
-    """在内存中处理 PDF 并返回处理后的字节流"""
-    # 从内存读取 PDF
+def resize_pdf_stream(input_bytes, target_w_mm, target_h_mm, margin_mm=2):
+    """在内存中将 PDF 缩放居中到指定毫米尺寸，并返回字节流"""
+    MM_TO_PTS = 72 / 25.4
+    
+    target_w_pts = target_w_mm * MM_TO_PTS
+    target_h_pts = target_h_mm * MM_TO_PTS
+    margin_pts = margin_mm * MM_TO_PTS
+
     src_doc = fitz.open(stream=input_bytes, filetype="pdf")
     dest_doc = fitz.open()
 
     for i, page in enumerate(src_doc):
-        rect = page.rect
         content_bbox = get_content_bbox(page)
-        
         if content_bbox.is_empty or content_bbox.width == 0:
-            content_bbox = rect
-
-        new_page = dest_doc.new_page(width=rect.width, height=rect.height)
+            content_bbox = page.rect
+            
+        avail_w = target_w_pts - 2 * margin_pts
+        avail_h = target_h_pts - 2 * margin_pts
         
-        dx = (rect.width - content_bbox.width) / 2
-        dy = (rect.height - content_bbox.height) / 2
-        target_rect = fitz.Rect(dx, dy, dx + content_bbox.width, dy + content_bbox.height)
-
+        # 等比例缩放计算
+        scale = min(avail_w / content_bbox.width, avail_h / content_bbox.height)
+        
+        new_w = content_bbox.width * scale
+        new_h = content_bbox.height * scale
+        
+        # 居中坐标计算
+        dx = (target_w_pts - new_w) / 2
+        dy = (target_h_pts - new_h) / 2
+        
+        target_rect = fitz.Rect(dx, dy, dx + new_w, dy + new_h)
+        
+        new_page = dest_doc.new_page(width=target_w_pts, height=target_h_pts)
         new_page.show_pdf_page(target_rect, src_doc, page.number, clip=content_bbox)
 
-    # 将新文档写入内存
     pdf_bytes = dest_doc.write()
     dest_doc.close()
     src_doc.close()
@@ -51,32 +61,49 @@ def center_pdf_stream(input_bytes):
     return pdf_bytes
 
 # ============ 网页 UI 设计 ============
-st.set_page_config(page_title="PDF 标签智能居中工具", page_icon="📄")
+st.set_page_config(page_title="PDF 标签尺寸转换器", page_icon="🏷️")
 
-st.title("📄 PDF 标签智能居中工具")
-st.write("上传你的条码或面单 PDF，系统会自动识别内容并将其置于 A4 纸正中心。")
+st.title("🏷️ PDF 标签尺寸智能转换器")
+st.write("上传标签 PDF，系统会自动提取内容并等比例缩放、居中到你指定的新尺寸中。")
 
-uploaded_file = st.file_uploader("请选择要处理的 PDF 文件", type=["pdf"])
+# 尺寸选择器
+size_option = st.radio(
+    "📏 请选择目标标签物理尺寸：",
+    ("50 x 30 mm (常规标签)", "70 x 40 mm (大标签)", "自定义尺寸")
+)
+
+# 动态设定长宽
+if size_option == "50 x 30 mm (常规标签)":
+    target_w, target_h = 50.0, 30.0
+elif size_option == "70 x 40 mm (大标签)":
+    target_w, target_h = 70.0, 40.0
+else:
+    col1, col2 = st.columns(2)
+    with col1:
+        target_w = st.number_input("宽度 (mm)", min_value=10.0, value=100.0, step=1.0)
+    with col2:
+        target_h = st.number_input("高度 (mm)", min_value=10.0, value=30.0, step=1.0)
+
+# 高级设置
+with st.expander("⚙️ 高级设置"):
+    margin = st.number_input("边缘留白安全区 (mm) - 防止打印机把边框切掉", min_value=0.0, value=2.0, step=0.5)
+
+uploaded_file = st.file_uploader("📥 请选择要处理的 PDF 文件", type=["pdf"])
 
 if uploaded_file is not None:
-    st.info("文件上传成功！点击下方按钮开始处理。")
-    
-    if st.button("🚀 开始智能居中", type="primary"):
+    if st.button("🚀 开始转换", type="primary"):
         with st.spinner('正在处理中，请稍候...'):
             try:
-                # 获取上传文件的字节流
                 input_bytes = uploaded_file.read()
                 
-                # 执行居中处理
-                output_bytes = center_pdf_stream(input_bytes)
+                output_bytes = resize_pdf_stream(input_bytes, target_w, target_h, margin)
                 
-                st.success("✅ 处理完成！")
+                st.success("✅ 转换成功！")
                 
-                # 提供下载按钮
                 st.download_button(
-                    label="⬇️ 下载居中后的 PDF",
+                    label=f"⬇️ 下载 {int(target_w)}x{int(target_h)}mm 的新 PDF",
                     data=output_bytes,
-                    file_name=f"居中_{uploaded_file.name}",
+                    file_name=f"转换_{int(target_w)}x{int(target_h)}_{uploaded_file.name}",
                     mime="application/pdf"
                 )
             except Exception as e:
