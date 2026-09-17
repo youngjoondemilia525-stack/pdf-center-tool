@@ -1,5 +1,7 @@
 import streamlit as st
 import fitz
+import zipfile
+import io
 
 def get_content_bbox(page):
     """提取页面内所有真实内容的边界框"""
@@ -61,10 +63,10 @@ def resize_pdf_stream(input_bytes, target_w_mm, target_h_mm, margin_mm=2):
     return pdf_bytes
 
 # ============ 网页 UI 设计 ============
-st.set_page_config(page_title="PDF 标签尺寸转换器", page_icon="🏷️")
+st.set_page_config(page_title="PDF 标签批量转换器", page_icon="🏷️")
 
-st.title("🏷️ PDF 标签尺寸智能转换器")
-st.write("上传标签 PDF，系统会自动提取内容并等比例缩放、居中到你指定的新尺寸中。")
+st.title("🏷️ PDF 标签尺寸批量转换器")
+st.write("上传标签 PDF（支持一次性拖入多个），系统会自动等比例缩放居中，并打包成 ZIP 供你一键下载。")
 
 # 尺寸选择器
 size_option = st.radio(
@@ -88,23 +90,38 @@ else:
 with st.expander("⚙️ 高级设置"):
     margin = st.number_input("边缘留白安全区 (mm) - 防止打印机把边框切掉", min_value=0.0, value=2.0, step=0.5)
 
-uploaded_file = st.file_uploader("📥 请选择要处理的 PDF 文件", type=["pdf"])
+# 核心修改点：允许上传多个文件 (accept_multiple_files=True)
+uploaded_files = st.file_uploader("📥 请选择要处理的 PDF 文件（可多选）", type=["pdf"], accept_multiple_files=True)
 
-if uploaded_file is not None:
-    if st.button("🚀 开始转换", type="primary"):
-        with st.spinner('正在处理中，请稍候...'):
+if uploaded_files:
+    st.info(f"📁 已准备就绪 {len(uploaded_files)} 个文件。")
+    
+    if st.button("🚀 开始批量转换", type="primary"):
+        with st.spinner('正在火速批量处理中，请稍候...'):
             try:
-                input_bytes = uploaded_file.read()
+                # 在内存中创建一个 ZIP 压缩包
+                zip_buffer = io.BytesIO()
                 
-                output_bytes = resize_pdf_stream(input_bytes, target_w, target_h, margin)
+                # 开始打包
+                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                    for file in uploaded_files:
+                        input_bytes = file.read()
+                        
+                        # 转换单个 PDF
+                        output_bytes = resize_pdf_stream(input_bytes, target_w, target_h, margin)
+                        
+                        # 把转换后的 PDF 塞进 ZIP 包里
+                        new_filename = f"转换_{int(target_w)}x{int(target_h)}_{file.name}"
+                        zip_file.writestr(new_filename, output_bytes)
                 
-                st.success("✅ 转换成功！")
+                st.success(f"✅ 成功转换并打包了 {len(uploaded_files)} 个文件！")
                 
+                # 提供 ZIP 打包下载
                 st.download_button(
-                    label=f"⬇️ 下载 {int(target_w)}x{int(target_h)}mm 的新 PDF",
-                    data=output_bytes,
-                    file_name=f"转换_{int(target_w)}x{int(target_h)}_{uploaded_file.name}",
-                    mime="application/pdf"
+                    label=f"📦 ⬇️ 一键下载全部转换结果 (ZIP)",
+                    data=zip_buffer.getvalue(),
+                    file_name=f"批量标签转换结果_{int(target_w)}x{int(target_h)}mm.zip",
+                    mime="application/zip"
                 )
             except Exception as e:
                 st.error(f"处理失败，错误信息: {str(e)}")
